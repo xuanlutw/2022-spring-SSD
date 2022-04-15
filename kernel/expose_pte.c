@@ -54,7 +54,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 		pr_info("pte value error.\n");
 		return -EINVAL;
 	}
-	pte_vma = find_vma(target_mm, args.begin_pte_vaddr);
+	pte_vma = find_vma(current_mm, args.begin_pte_vaddr);
 	if (!pte_vma || pte_vma->vm_start > args.begin_pte_vaddr) {
 		pr_info("pte_vma error.\n");
 		return -EINVAL;
