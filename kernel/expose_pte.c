@@ -25,7 +25,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 
 	// Traverse the page table.
 	// Inefficiency lol.
-    // Reference: arch/arm64/mm/fault.c#show_pte(unsigned long addr)
+	// Reference: arch/arm64/mm/fault.c#show_pte(unsigned long addr)
 	fpt   = begin_fpt;
 	ptep  = begin_ptep;
 	vaddr = begin_vaddr;
@@ -36,7 +36,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 		pgd = READ_ONCE(*pgdp);
 		if (pgd_none(pgd) || pgd_bad(pgd)) {
 			fpt   += (1 << 18);
-			vaddr += ((unsigned long)1 << 39);
+			vaddr += (1ul << 39);
 			continue;
 		}
 
@@ -105,7 +105,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	if ((args.begin_pte_vaddr & ((1 << 12) - 1)) ||
 			(args.end_pte_vaddr & ((1 << 12) - 1)) ||
 			(args.begin_pte_vaddr > args.end_pte_vaddr) ||
-			(args.end_pte_vaddr >= ((unsigned long)1 << 48))) {
+			(args.end_pte_vaddr >= (1ul << 48))) {
 		pr_info("pte value error.\n");
 		return -EINVAL;
 	}
@@ -123,7 +123,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 
 	// Check vaddr value and align pmd.
 	if ((args.begin_vaddr > args.end_vaddr) ||
-			(args.end_vaddr >= ((unsigned long)1 << 48))) {
+			(args.end_vaddr >= (1ul << 48))) {
 		pr_info("vaddr value error.\n");
 		return -EINVAL;
 	}
@@ -135,16 +135,16 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 
 	// Check fpt value.
 	if ((args.begin_fpt_vaddr > args.end_fpt_vaddr) ||
-			(args.end_fpt_vaddr >= ((unsigned long)1 << 48))) {
+			(args.end_fpt_vaddr >= (1ul << 48))) {
 		pr_info("fpt value error.\n");
 		return -EINVAL;
 	}
 	fpt_len = args.end_fpt_vaddr - args.begin_fpt_vaddr;
 
 	// Allocate space for fpt table
-	fpt = kmalloc(args.end_fpt_vaddr - args.begin_fpt_vaddr, GFP_ATOMIC);
+	fpt = kmalloc(fpt_len, GFP_ATOMIC);
 	if (fpt == NULL) {
-		pr_info("Allocate fpt fail.\n");
+		// pr_info("Allocate fpt fail.\n");
 		return -EINVAL;
 	}
 	memset(fpt, 0, fpt_len);
