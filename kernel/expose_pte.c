@@ -10,6 +10,26 @@
 #include <asm/syscall.h>
 #include <asm/pgtable.h>
 
+/**
+ * _expose_pte - Expose PTE to user space.
+ * @mm: target task's mm structure.
+ * @pte_vma: remapped page table's virtual memory area.
+ * @begin_fpt: pointer to the start virtual address of
+ *             the flattend page table.
+ * @end_fpt: pointer to the end virtual address of the
+ *           flattend page table.
+ * @begin_ptep: pointer to the start virtual address of
+ *              the remapped page table.
+ * @end_ptep: pointer to the end virtual address of the
+ *            remapped page table.
+ * @begin_vaddr: the start virtual address of the exploited region.
+ * @end_vaddr: the end virtual address of the exploited region.
+ *
+ * The function assumes vaddr ard aligned to PME boundary (2MB),
+ * and all arguments are valid.
+ *
+ * Return: 0 if success, otherwise -EINVAL.
+ */
 int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 	void **begin_fpt, void **end_fpt, void *begin_ptep, void *end_ptep,
 	unsigned long begin_vaddr, unsigned long end_vaddr)
@@ -25,7 +45,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 	pmd_t *pmdp, pmd;
 	pte_t *ptep_p;
 
-	/*
+	/**
 	 * Traverse the page table.
 	 * Inefficiency lol.
 	 * Reference: arch/arm64/mm/fault.c#show_pte(unsigned long addr)
@@ -64,7 +84,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 		ptep_p = pte_offset_map(pmdp, vaddr);
 		*fpt   = ptep;
 
-		/*
+		/**
 		 * pte_vma is checked outside this function, and
 		 * it's definitely not null.
 		 */
@@ -114,7 +134,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 
 	mm = get_task_mm(task);
 	if (!mm) {
-		pr_info("Target task is a kernel thread.\n");
+		pr_info("mm is not exists.\n");
 		ret = -EINVAL;
 		goto leave_without_mm;
 	}
@@ -143,7 +163,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	}
 	fpt_vma = find_vma(current->mm, args.begin_fpt_vaddr);
 	if (!fpt_vma || fpt_vma->vm_start > args.begin_fpt_vaddr) {
-		pr_info("pte_vma error.\n");
+		pr_info("fpt_vma error.\n");
 		ret = -EINVAL;
 		goto leave;
 	}
