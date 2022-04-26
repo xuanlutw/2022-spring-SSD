@@ -4,6 +4,7 @@
 #include <linux/mm_types.h>
 #include <linux/sched.h>
 #include <linux/string.h>
+#include <linux/sched/mm.h>
 #include <linux/expose_pte.h>
 
 #include <asm/syscall.h>
@@ -14,6 +15,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 	unsigned long begin_vaddr, unsigned long end_vaddr)
 {
 	int ret = 0;
+	int ret_remap;
 	void **fpt;
 	void *ptep;
 	unsigned long vaddr;
@@ -59,8 +61,16 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 		// Remapping
 		ptep_p = pte_offset_map(pmdp, vaddr);
 		*fpt   = ptep;
-		if (remap_pfn_range(pte_vma, (unsigned long)ptep,
-			virt_to_pfn(ptep_p), 1 << 12, pte_vma->vm_page_prot)) {
+
+		/*
+		 * pte_vma is checked outside this function, and
+		 * it's definitely not null.
+		 */
+		down_write(&pte_vma->vm_mm->mmap_sem);
+		ret_remap = remap_pfn_range(pte_vma, (unsigned long)ptep,
+			virt_to_pfn(ptep_p), 1 << 12, pte_vma->vm_page_prot);
+		up_write(&pte_vma->vm_mm->mmap_sem);
+		if (ret_remap) {
 			pr_info("Remap fail\n");
 			ret = -EINVAL;
 		}
@@ -77,7 +87,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	struct expose_pte_args args;
 	struct task_struct *task;
 	struct mm_struct *mm;
-	struct vm_area_struct *pte_vma;
+	struct vm_area_struct *pte_vma, *fpt_vma;
 	void **fpt;
 	unsigned long fpt_len;
 	unsigned long align_begin_vaddr, align_end_vaddr;
@@ -90,15 +100,21 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	}
 
 	// Check pid. Get task/mm from pid.
+	read_lock(&tasklist_lock);
 	task = find_task_by_pid_ns(args.pid, &init_pid_ns);
+	if (task)
+		get_task_struct(task);
+	read_unlock(&tasklist_lock);
 	if (!task) {
 		pr_info("Invalid pid.\n");
 		return -EINVAL;
 	}
-	mm = task->mm;
+
+	mm = get_task_mm(task);
 	if (!mm) {
 		pr_info("Target task is a kernel thread.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave_without_mm;
 	}
 
 	// Check pte value.
@@ -107,25 +123,35 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 			(args.begin_pte_vaddr > args.end_pte_vaddr) ||
 			(args.end_pte_vaddr >= (1ul << 48))) {
 		pr_info("pte value error.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
 	}
 
 	// Check pte in a single vma (via mmap with MAP_SHARED).
 	if (!(current->mm)) {
 		pr_info("Current task is a kernel thread.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
 	}
 	pte_vma = find_vma(current->mm, args.begin_pte_vaddr);
 	if (!pte_vma || pte_vma->vm_start > args.begin_pte_vaddr) {
 		pr_info("pte_vma error.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
+	}
+	fpt_vma = find_vma(current->mm, args.begin_fpt_vaddr);
+	if (!fpt_vma || fpt_vma->vm_start > args.begin_fpt_vaddr) {
+		pr_info("pte_vma error.\n");
+		ret = -EINVAL;
+		goto leave;
 	}
 
 	// Check vaddr value and align pmd.
 	if ((args.begin_vaddr > args.end_vaddr) ||
 			(args.end_vaddr >= (1ul << 48))) {
 		pr_info("vaddr value error.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
 	}
 	align_begin_vaddr = args.begin_vaddr -
 		(args.begin_vaddr & ((1 << 21) - 1));
@@ -137,15 +163,16 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	if ((args.begin_fpt_vaddr > args.end_fpt_vaddr) ||
 			(args.end_fpt_vaddr >= (1ul << 48))) {
 		pr_info("fpt value error.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
 	}
 	fpt_len = args.end_fpt_vaddr - args.begin_fpt_vaddr;
 
 	// Allocate space for fpt table
 	fpt = kmalloc(fpt_len, GFP_ATOMIC);
 	if (fpt == NULL) {
-		// pr_info("Allocate fpt fail.\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto leave;
 	}
 	memset(fpt, 0, fpt_len);
 
@@ -160,5 +187,12 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	}
 
 	kfree(fpt);
+
+leave:
+	mmput(mm);
+
+leave_without_mm:
+	put_task_struct(task);
+
 	return ret;
 }
