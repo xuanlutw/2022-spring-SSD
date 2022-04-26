@@ -25,9 +25,11 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 	pmd_t *pmdp, pmd;
 	pte_t *ptep_p;
 
-	// Traverse the page table.
-	// Inefficiency lol.
-	// Reference: arch/arm64/mm/fault.c#show_pte(unsigned long addr)
+	/*
+	 * Traverse the page table.
+	 * Inefficiency lol.
+	 * Reference: arch/arm64/mm/fault.c#show_pte(unsigned long addr)
+	 */
 	fpt   = begin_fpt;
 	ptep  = begin_ptep;
 	vaddr = begin_vaddr;
@@ -58,7 +60,7 @@ int _expose_pte(struct mm_struct *mm, struct vm_area_struct *pte_vma,
 			continue;
 		}
 
-		// Remapping
+		/* Remapping. */
 		ptep_p = pte_offset_map(pmdp, vaddr);
 		*fpt   = ptep;
 
@@ -93,13 +95,13 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	unsigned long align_begin_vaddr, align_end_vaddr;
 	int ret;
 
-	// Get args.
+	/* Get args. */
 	if (copy_from_user(&args, args_user, sizeof(struct expose_pte_args))) {
 		pr_info("Copy args from user fail.\n");
 		return -EINVAL;
 	}
 
-	// Check pid. Get task/mm from pid.
+	/* Check pid. Get task/mm from pid. */
 	read_lock(&tasklist_lock);
 	task = find_task_by_pid_ns(args.pid, &init_pid_ns);
 	if (task)
@@ -117,7 +119,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 		goto leave_without_mm;
 	}
 
-	// Check pte value.
+	/* Check pte value. */
 	if ((args.begin_pte_vaddr & ((1 << 12) - 1)) ||
 			(args.end_pte_vaddr & ((1 << 12) - 1)) ||
 			(args.begin_pte_vaddr > args.end_pte_vaddr) ||
@@ -127,7 +129,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 		goto leave;
 	}
 
-	// Check pte in a single vma (via mmap with MAP_SHARED).
+	/* Check pte in a single vma (via mmap with MAP_SHARED). */
 	if (!(current->mm)) {
 		pr_info("Current task is a kernel thread.\n");
 		ret = -EINVAL;
@@ -146,7 +148,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 		goto leave;
 	}
 
-	// Check vaddr value and align pmd.
+	/* Check vaddr value and align pmd. */
 	if ((args.begin_vaddr > args.end_vaddr) ||
 			(args.end_vaddr >= (1ul << 48))) {
 		pr_info("vaddr value error.\n");
@@ -159,7 +161,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	align_end_vaddr   = align_end_vaddr -
 		(align_end_vaddr & ((1 << 21) - 1)) + (1 << 21);
 
-	// Check fpt value.
+	/* Check fpt value. */
 	if ((args.begin_fpt_vaddr > args.end_fpt_vaddr) ||
 			(args.end_fpt_vaddr >= (1ul << 48))) {
 		pr_info("fpt value error.\n");
@@ -168,7 +170,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 	}
 	fpt_len = args.end_fpt_vaddr - args.begin_fpt_vaddr;
 
-	// Allocate space for fpt table
+	/* Allocate space for fpt table. */
 	fpt = kmalloc(fpt_len, GFP_ATOMIC);
 	if (fpt == NULL) {
 		ret = -EINVAL;
@@ -180,7 +182,7 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 		(void *)args.begin_pte_vaddr, (void *)args.end_pte_vaddr,
 		align_begin_vaddr, align_end_vaddr);
 
-	// Restore result
+	/* Restore result. */
 	if (copy_to_user((void *)args.begin_fpt_vaddr, fpt, fpt_len)) {
 		pr_info("Copy results to user fail.\n");
 		ret = -EINVAL;
@@ -188,9 +190,11 @@ SYSCALL_DEFINE1(expose_pte, struct expose_pte_args __user *, args_user)
 
 	kfree(fpt);
 
+	/* Normal exit. */
 leave:
 	mmput(mm);
 
+	/* Exit point while mm is null. */
 leave_without_mm:
 	put_task_struct(task);
 
