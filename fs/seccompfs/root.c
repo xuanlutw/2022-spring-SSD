@@ -9,18 +9,93 @@
 #include <linux/time.h>
 #include <uapi/linux/mount.h>
 #include "internal.h"
-#define INO_ROOT   1
+
+struct dentry *seccompfs_setup(struct super_block *sb, struct dentry *parent_d,
+        const char *name, unsigned int ino, umode_t mode);
 
 static const struct super_operations seccompfs_sops;
 static const struct inode_operations seccompfs_inode_ops;
 static const struct file_operations  seccompfs_dir_ops;
 
-/* temp dentry pointer for "config" */
+/* dentry pointers */
 static struct dentry *config_dentry_p;
 static struct dentry *begin_dentry_p;
 
-/* temp seccomp info list */
-static struct seccomp_info * seccomp_info_list = NULL;
+/* seccomp_info list */
+LIST_HEAD(seccomp_info_list);
+int seccomp_info_list_len = 0;
+
+/* seccomp_info now */
+static struct seccomp_info* seccomp_info_now;
+
+/* seccomp_info operations */
+struct seccomp_info *new_seccomp_info(void)
+{
+    struct seccomp_info* this;
+
+    this = kmalloc(sizeof(struct seccomp_info), GFP_KERNEL);
+    this->pid = 0;
+    this->len = 0;
+    this->dir = NULL;
+    this->log = NULL;
+
+    return this;
+}
+
+void seccomp_info_set_filters(struct seccomp_info* this, pid_t pid, short int len,
+        short int *filter)
+{
+    int i;
+
+    this->pid = pid;
+    this->len = len;
+    for (i = 0; i < len; ++i)
+        this->filter[i] = filter[i];
+}
+
+int seccomp_info_create_file(struct seccomp_info* this, struct super_block *sb)
+{
+    char dir_name[BUF_SIZE];
+
+    // init dir
+    sprintf(dir_name, "%d", this->pid);
+    this->dir = seccompfs_setup(sb, sb->s_root, dir_name, INO_DIR(this->pid),
+            S_IFDIR | 0500);
+    if (!this->dir) {
+        pr_info("seccompfs_fill_super: setup dir error.");
+        return -ENOMEM;
+    }
+
+    // init log
+    this->log = seccompfs_setup(sb, this->dir, "log", INO_LOG(this->pid),
+            S_IFREG | 0400);
+    if (!this->dir) {
+        pr_info("seccompfs_fill_super: setup log error.");
+        return -ENOMEM;
+    }
+}
+
+struct seccomp_info *get_seccomp_info_by_pid(pid_t pid) {
+    struct seccomp_info* item;
+
+    list_for_each_entry(item, &seccomp_info_list, list) {
+        if (pid == item->pid) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+struct seccomp_info *get_seccomp_info_by_dir_ino(unsigned int ino) {
+    struct seccomp_info* item;
+
+    list_for_each_entry(item, &seccomp_info_list, list) {
+        if (ino == INO_DIR(item->pid)) {
+            return item;
+        }
+    }
+    return NULL;
+}
 
 /* copied from libfs.c */
 static inline unsigned char dt_type(struct inode *inode)
@@ -31,33 +106,72 @@ static inline unsigned char dt_type(struct inode *inode)
 /* cd needs lookup, ls needs iterate */
 static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 {
-    pr_info("%s called\n", __func__);
+    unsigned int count;
+    unsigned int ino;
+    struct seccomp_info *item;
 
-    if (file->f_inode->i_ino = INO_ROOT) {
+    ino = file_inode(file)->i_ino;
+    pr_info("%s called %d %p\n", __func__, ino, file);
+
+    if (ino == INO_ROOT) {
+        // . and ..
         if (dc->pos == 0) {
             dir_emit_dots(file, dc);
         }
+        // config
         if (dc->pos == 2) {
             dir_emit(dc, config_dentry_p->d_name.name,
                     config_dentry_p->d_name.len,
                     d_inode(config_dentry_p)->i_ino,
                     dt_type(d_inode(config_dentry_p)));
+            dc->pos++;
+        }
+        // begin
+        if (dc->pos == 3) {
             dir_emit(dc, begin_dentry_p->d_name.name, 
                     begin_dentry_p->d_name.len, 
                     d_inode(begin_dentry_p)->i_ino, 
                     dt_type(d_inode(begin_dentry_p)));
-            dc->pos += 2;
+            dc->pos++;
         }
-        // TODO OTHERS
+        // pids
+        count = dc->pos - 4;
+        list_for_each_entry(item, &seccomp_info_list, list) {
+            if (!count) {
+                dir_emit(dc, item->dir->d_name.name, 
+                        item->dir->d_name.len, 
+                        d_inode(item->dir)->i_ino, 
+                        dt_type(d_inode(item->dir)));
+                dc->pos += 1;
+            }
+            else
+                count--;
+        }
     }
     else {
-        printk("PIDHIHI");
+        // . and ..
+        if (dc->pos == 0) {
+            dir_emit_dots(file, dc);
+        }
+        if (dc->pos > 2) {
+            return 0;
+        }
+        // log
+        item = get_seccomp_info_by_dir_ino(ino);
+        if (item) {
+            dir_emit(dc, item->log->d_name.name, 
+                    item->log->d_name.len, 
+                    d_inode(item->log)->i_ino, 
+                    dt_type(d_inode(item->log)));
+            dc->pos += 1;
+        }
     }
 
     return 0;
 }
 
-static ssize_t seccompfs_read(struct file *file, char __user *buf, size_t count, loff_t *ppos) 
+static ssize_t seccompfs_read(struct file *file, char __user *buf,
+        size_t count, loff_t *ppos) 
 {
     int i = 0;
     int written = 0;
@@ -75,102 +189,126 @@ static ssize_t seccompfs_read(struct file *file, char __user *buf, size_t count,
     return count;
 }
 
+static int get_long(char **buf, long *val)
+{
+    char *token;
+    int ret;
+
+    token = strsep(buf, ",");
+    if (token == NULL) {
+        pr_err("seccompfs: strsep error.\n");
+        return -EFAULT;
+    }
+
+    ret = kstrtol(token, 10, val);
+    if (ret) {
+        pr_err("seccompfs: kstrtol error.\n");
+        return ret;
+    }
+
+    return 0;
+}
+
+static int handle_config (char *buf, size_t count)
+{
+    long val;
+    int i, ret;
+    pid_t pid;
+    short int len;
+    short int filter[MAX_FILTER];
+
+    pr_info("%s called\n", __func__);
+
+    // get pid
+    ret = get_long(&buf, &val);
+    if (ret) {
+        return ret;
+    }
+    pid = (pid_t)val;
+    pr_info("pid: %d\n", pid);
+
+    // get len
+    ret = get_long(&buf, &val);
+    if (ret) {
+        return ret;
+    }
+    len = (pid_t)val;
+    pr_info("len: %d\n", len);
+
+    // get filter
+    if (len > MAX_FILTER)
+        return -EFAULT;
+    for (i = 0; i < len; ++i) {
+        ret = get_long(&buf, &val);
+            if (ret) {
+                return ret;
+            }
+        filter[i] = (pid_t)val;
+        pr_info("filter[%d]: %d\n", i, filter[i]);
+    }
+
+    // all correct, write into info now
+    seccomp_info_set_filters(seccomp_info_now, pid, len, filter);
+
+    return 0;
+}
+
+static int handle_begin (struct super_block *sb) {
+    struct task_struct * task;
+
+    // no config set
+    if (seccomp_info_now->len = 0) {
+ 		pr_err("config first.\n");
+        return -EFAULT;
+    }
+
+    // check already set
+    if (get_seccomp_info_by_pid(seccomp_info_now->pid)) {
+ 		pr_err("pid already set.\n");
+        return -EFAULT;
+    }
+
+    // check exists of pid
+    task = find_task_by_pid_ns(seccomp_info_now->pid, &init_pid_ns);
+ 	if (!task) {
+ 		pr_err("pid not exists.\n");
+ 		return -EFAULT;
+ 	}
+
+    // trigger seccomp filter here
+
+    // post process
+    seccomp_info_create_file(seccomp_info_now, sb);
+    list_add(&(seccomp_info_now->list), &seccomp_info_list);
+    seccomp_info_list_len++;
+    seccomp_info_now = new_seccomp_info();
+
+    return 0;
+}
+
 static ssize_t seccomp_write(struct file *file, const char __user *buf,
                             size_t count, loff_t *ppos) {
-    if (!(file->f_inode))
+    int ret = 0;
+    char kbuf[BUF_SIZE];
+    count = (count > BUF_SIZE - 1)? (count > BUF_SIZE - 1): count;
+    if (copy_from_user(kbuf, buf, count))
         return -EFAULT;
-    switch (file->f_inode->i_ino) {
+    kbuf[count] = 0;
+
+    switch (file_inode(file)->i_ino) {
         case INO_CONFIG:
+            ret = handle_config(kbuf, count);
             printk("CONFIG\n");
             break;
         case INO_BEGIN:
+            ret = handle_begin(file_inode(file)->i_sb);
             printk("BEGIN\n");
             break;
         default:
             printk("WTF\n");
     }
     // Cheat it
-    return count;
-}
-
-static ssize_t config_write(struct file *file, const char __user *buf,
-                            size_t count, loff_t *ppos)
-{
-    char buffer[BUF_SIZE];
-    char *token, *cur = buffer;
-    struct seccomp_info *info;
-    long val;
-    int i, ret;
-
-    pr_info("%s called\n", __func__);
-
-    memset(buffer, 0, sizeof(buffer));
-    if (count > sizeof(buffer) - 1)
-        count = sizeof(buffer) - 1;
-    if (copy_from_user(buffer, buf, count))
-        return -EFAULT;
-
-    info = (struct seccomp_info *)kmalloc(sizeof(struct seccomp_info), GFP_KERNEL);
-
-    /* Need to handle input errors. */
-    token = strsep(&cur, ",");
-    ret = kstrtol(token, 10, &val);
-    if (ret)
-        pr_err("seccompfs: config_write kstrtol error.\n");
-    info->pid = (pid_t)val;
-    pr_info("config_write pid: %d\n", info->pid);
-
-    token = strsep(&cur, ",");
-    ret = kstrtol(token, 10, &val);
-    if (ret)
-        pr_err("seccompfs: config_write kstrtol error.\n");
-    info->len = (short int)val;
-    pr_info("config_write len: %d\n", info->len);
-
-    pr_info("config_write seccomp list:\n");
-    info->seccomp_list = (short int *)kmalloc(info->len * sizeof(short int), GFP_KERNEL);
-    for (i = 0; i < info->len; ++i) {
-        token = strsep(&cur, ",");
-        ret = kstrtol(token, 10, &val);
-        if (ret)
-            pr_err("seccompfs: config_write kstrtol error.\n");
-
-        info->seccomp_list[i] = (short int)val;
-        pr_info("%d %d\n", i, info->seccomp_list[i]);
-    }
-
-    info->next = seccomp_info_list;
-    seccomp_info_list = info;
-
-    return count;
-}
-
-static ssize_t begin_write(struct file *file, const char __user *buf,
-                            size_t count, loff_t *ppos)
-{
-    char buffer[BUF_SIZE];
-    char *token, *cur = buffer;
-    long val;
-    pid_t pid;
-    int ret;
-
-    pr_info("%s called\n", __func__);
-
-    memset(buffer, 0, sizeof(buffer));
-    if (count > sizeof(buffer) - 1)
-        count = sizeof(buffer) - 1;
-    if (copy_from_user(buffer, buf, count))
-        return -EFAULT;
-
-    /* Need to handle input errors. */
-    token = strsep(&cur, ",");
-    ret = kstrtol(token, 10, &val);
-    if (ret)
-        pr_err("seccompfs: begin_write kstrtol error.\n");
-    pid = (pid_t)val;
-    pr_info("begin_write pid: %d\n", pid);
-
-    return count;
+    return ret < 0? -EFAULT: count;
 }
 
 static const struct file_operations seccompfs_file_fops = {
@@ -178,9 +316,12 @@ static const struct file_operations seccompfs_file_fops = {
     .write  = seccomp_write,
     .llseek = noop_llseek,
 };
-
+struct dentry *seccomp_lookup(struct inode *inode, struct dentry *dentry, unsigned int mode) {
+    pr_err("LOOK!");
+    simple_lookup(inode, dentry, mode);
+}
 static const struct inode_operations seccompfs_dir_inode_ops = {
-    .lookup = simple_lookup, 
+    .lookup = seccomp_lookup, 
     .getattr = simple_getattr,
 };
 
@@ -307,6 +448,9 @@ static int seccompfs_fill_super(struct super_block *sb, struct fs_context * fc)
         pr_info("seccompfs_fill_super: setup begin error.");
         return -ENOMEM;
     }
+
+    // init seccomp_info
+    seccomp_info_now = new_seccomp_info();
 
     return 0;
 }

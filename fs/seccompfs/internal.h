@@ -1,9 +1,11 @@
 #include <linux/fs.h>
 #include <linux/types.h>
+#include <linux/list.h>
 
-#define ROOT_INO 1
-#define BUF_SIZE 1024
+#define BUF_SIZE   1024
+#define MAX_FILTER 1024
 
+#define INO_ROOT   1
 #define INO_CONFIG 10
 #define INO_BEGIN  11
 #define INO_SHIFT  12
@@ -11,8 +13,10 @@
 #define INO_LOG(pid) ((pid)<<1 + INO_SHIFT + 1)
 
 struct seccomp_info {
+    struct list_head list;
     pid_t pid;
     short int len;
-    short int *seccomp_list;
-    struct seccomp_info *next;
+    short int filter[MAX_FILTER];
+    struct dentry *dir;
+    struct dentry *log;
 };
