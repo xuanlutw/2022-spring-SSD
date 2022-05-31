@@ -25,6 +25,7 @@ static struct dentry *begin_dentry_p;
 
 /* seccomp_info list */
 LIST_HEAD(seccomp_info_list);
+DEFINE_MUTEX(seccomp_info_list_mutex);
 int seccomp_info_list_len = 0;
 
 /* seccomp_info now */
@@ -217,14 +218,16 @@ void seccompfs_log(pid_t pid, unsigned int nr, unsigned int action)
     struct seccomp_info *this;
     int len;
 
-    this = get_seccomp_info_by_pid(pid);
-    if (!this)
-        return;
-    len = snprintf(this->content + this->content_len,
-            MAX_CONTENT_LEN - this->content_len, "%d %d\n", nr, action);
-    this->content_len += len;
+    mutex_lock(&seccomp_info_list_mutex);
 
-    pr_info("RECV: %d %d %d %d", pid, nr, action, len);
+    this = get_seccomp_info_by_pid(pid);
+    if (this) {
+        len = snprintf(this->content + this->content_len,
+                MAX_CONTENT_LEN - this->content_len, "%d %d\n", nr, action);
+        this->content_len += len;
+    }
+
+    mutex_unlock(&seccomp_info_list_mutex);
 }
 
 /* copied from libfs.c */
@@ -381,39 +384,45 @@ static int handle_config (char *buf, size_t count)
 
     pr_info("=======================\n");
 
+    mutex_lock(&seccomp_info_list_mutex);
+
     // all correct, save to into seccomp_info_now
     seccomp_info_set_filters(seccomp_info_now, pid, len, filter);
+
+    mutex_unlock(&seccomp_info_list_mutex);
 
     return 0;
 }
 
 static int handle_begin (struct super_block *sb) {
     struct task_struct * task;
-    int ret;
+    int ret = -EFAULT;
+
+    mutex_lock(&seccomp_info_list_mutex);
 
     // no config set
     if (seccomp_info_now->len == 0) {
  		pr_err("config first.\n");
-        return -EFAULT;
+        goto out;
     }
 
     // check already set
     if (get_seccomp_info_by_pid(seccomp_info_now->pid)) {
  		pr_err("pid already set.\n");
-        return -EFAULT;
+        goto out;
     }
 
     // check exists of pid
     task = find_task_by_pid_ns(seccomp_info_now->pid, &init_pid_ns);
  	if (!task) {
  		pr_err("pid not exists.\n");
- 		return -EFAULT;
+        goto out;
  	}
 
     // attach seccomp filter
     ret = seccomp_info_attach_filter(seccomp_info_now);
     if (ret)
-        return ret;
+        goto out;
 
     // post process
     seccomp_info_create_file(seccomp_info_now, sb);
@@ -421,7 +430,10 @@ static int handle_begin (struct super_block *sb) {
     seccomp_info_list_len++;
     seccomp_info_now = new_seccomp_info();
 
-    return 0;
+    mutex_unlock(&seccomp_info_list_mutex);
+
+out:
+    return ret;
 }
 
 static ssize_t seccomp_write(struct file *file, const char __user *buf,
