@@ -28,6 +28,8 @@
 #include <linux/syscalls.h>
 #include <linux/sysctl.h>
 
+extern void seccompfs_log(pid_t pid, unsigned int nr, unsigned int action);
+
 #ifdef CONFIG_HAVE_ARCH_SECCOMP_FILTER
 #include <asm/syscall.h>
 #endif
@@ -808,8 +810,7 @@ static int __seccomp_filter(int this_syscall, const struct seccomp_data *sd,
 	action = filter_ret & SECCOMP_RET_ACTION_FULL;
 
     // RECEIVE RESULTS HERE
-    if (current->pid > 1600)
-        printk("%d %d %d", current->pid, sd->nr, action);
+    seccompfs_log(current->pid, sd->nr, action);
 
 	switch (action) {
 	case SECCOMP_RET_ERRNO:

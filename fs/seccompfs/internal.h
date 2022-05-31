@@ -4,6 +4,7 @@
 
 #define BUF_SIZE   1024
 #define MAX_FILTER 128
+#define MAX_CONTENT_LEN 4096
 
 #define INO_ROOT   1
 #define INO_CONFIG 10
@@ -28,6 +29,8 @@ struct seccomp_info {
     pid_t pid;
     unsigned int len;
     unsigned int filter[MAX_FILTER];
+    unsigned int content_len;
+    char* content;
     struct dentry *dir;
     struct dentry *log;
 };

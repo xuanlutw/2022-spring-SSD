@@ -39,10 +39,14 @@ struct seccomp_info *new_seccomp_info(void)
     if (!this)
         return NULL;
 
-    this->pid = 0;
-    this->len = 0;
-    this->dir = NULL;
-    this->log = NULL;
+    this->pid         = 0;
+    this->len         = 0;
+    this->content_len = 0;
+    this->content     = kmalloc(MAX_CONTENT_LEN, GFP_KERNEL);
+    this->dir         = NULL;
+    this->log         = NULL;
+    if (!this->content)
+        return NULL;
 
     return this;
 }
@@ -63,7 +67,7 @@ int seccomp_info_create_file(struct seccomp_info* this, struct super_block *sb)
     char dir_name[BUF_SIZE];
 
     // init dir
-    sprintf(dir_name, "%d", this->pid);
+    snprintf(dir_name, BUF_SIZE, "%d", this->pid);
     this->dir = seccompfs_setup(sb, sb->s_root, dir_name, INO_DIR(this->pid),
             S_IFDIR | 0500);
     if (!this->dir) {
@@ -82,7 +86,7 @@ int seccomp_info_create_file(struct seccomp_info* this, struct super_block *sb)
     return 0;
 }
 
-struct seccomp_info *get_seccomp_info_by_pid(pid_t pid) {
+static inline struct seccomp_info *get_seccomp_info_by_pid(pid_t pid) {
     struct seccomp_info* item;
 
     list_for_each_entry(item, &seccomp_info_list, list) {
@@ -93,11 +97,22 @@ struct seccomp_info *get_seccomp_info_by_pid(pid_t pid) {
     return NULL;
 }
 
-struct seccomp_info *get_seccomp_info_by_dir_ino(unsigned int ino) {
+static inline struct seccomp_info *get_seccomp_info_by_dir_ino(unsigned int ino) {
     struct seccomp_info* item;
 
     list_for_each_entry(item, &seccomp_info_list, list) {
         if (ino == INO_DIR(item->pid)) {
+            return item;
+        }
+    }
+    return NULL;
+}
+
+static inline struct seccomp_info *get_seccomp_info_by_log_ino(unsigned int ino) {
+    struct seccomp_info* item;
+
+    list_for_each_entry(item, &seccomp_info_list, list) {
+        if (ino == INO_LOG(item->pid)) {
             return item;
         }
     }
@@ -197,6 +212,21 @@ int seccomp_info_attach_filter(struct seccomp_info *this) {
     return 0;
 }
 
+void seccompfs_log(pid_t pid, unsigned int nr, unsigned int action)
+{
+    struct seccomp_info *this;
+    int len;
+
+    this = get_seccomp_info_by_pid(pid);
+    if (!this)
+        return;
+    len = snprintf(this->content + this->content_len,
+            MAX_CONTENT_LEN - this->content_len, "%d %d\n", nr, action);
+    this->content_len += len;
+
+    pr_info("RECV: %d %d %d %d", pid, nr, action, len);
+}
+
 /* copied from libfs.c */
 static inline unsigned char dt_type(struct inode *inode)
 {
@@ -206,6 +236,7 @@ static inline unsigned char dt_type(struct inode *inode)
 /* cd needs lookup, ls needs iterate */
 static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 {
+    // TODO: return of dir_emit
     unsigned int count;
     unsigned int ino;
     struct seccomp_info *item;
@@ -270,31 +301,25 @@ static int seccompfs_iterate(struct file *file, struct dir_context *dc)
     return 0;
 }
 
-// dummy
 static ssize_t seccompfs_read(struct file *file, char __user *buf,
         size_t count, loff_t *ppos)
 {
+    struct seccomp_info *this;
+    int ret;
+
+    this = get_seccomp_info_by_log_ino(file_inode(file)->i_ino);
+    if (!this)
+        return 0;
+    
+    if (*ppos > this->content_len)
+        return 0;
+    count = count > (this->content_len - *ppos)? (this->content_len - *ppos): count; 
+    ret   = copy_to_user(buf, this->content + *ppos, count);
+    count = count - ret;
+    *ppos += count;
+
     return count;
 }
-
-/* static ssize_t seccompfs_read(struct file *file, char __user *buf,
-        size_t count, loff_t *ppos) 
-{
-    int i = 0;
-    int written = 0;
-    char * s = "hello world!\n";
-    pr_info("%s called\n", __func__);
-    if (*ppos > 12 || *ppos < 0) {
-        pr_info("read return 0, *ppos: %lld\n", *ppos);
-        return 0;
-    }
-    if (count > 13 - *ppos)
-        count = 13 - *ppos;
-    copy_to_user(buf, &(s[*ppos]), count);
-    *ppos += count;
-    pr_info("read %ld\n", count);
-    return count;
-} */
 
 static int get_long(char **buf, long *val)
 {
