@@ -810,7 +810,7 @@ static int __seccomp_filter(int this_syscall, const struct seccomp_data *sd,
 	action = filter_ret & SECCOMP_RET_ACTION_FULL;
 
     // RECEIVE RESULTS HERE
-    seccompfs_log(current->pid, sd->nr, action);
+	seccompfs_log(current->pid, sd->nr, action);
 
 	switch (action) {
 	case SECCOMP_RET_ERRNO:
@@ -1342,6 +1342,61 @@ static inline long seccomp_set_mode_filter(unsigned int flags,
 	return -EINVAL;
 }
 #endif
+
+/* seccompfs */
+// c.f. seccomp_prepare_filter()
+static struct seccomp_filter *seccomp_prepare_filter_from_kern(
+	struct sock_fprog_kern *fprog)
+{
+	struct seccomp_filter *sfilter;
+	int ret;
+
+	sfilter = kzalloc(sizeof(*sfilter), GFP_KERNEL | __GFP_NOWARN);
+	if (!sfilter)
+		return NULL;
+
+	mutex_init(&sfilter->notify_lock);
+	ret = bpf_prog_create_haha(&sfilter->prog, fprog, seccomp_check_filter);
+	if (ret) {
+		kfree(sfilter);
+		return NULL;
+	}
+	sfilter->log = true;
+	sfilter->prev = NULL;
+
+	refcount_set(&sfilter->usage, 1);
+
+	return sfilter;
+}
+
+// c.f. seccomp_attach_filter()
+// c.f. seccomp_assign_mode()
+int seccomp_attach_filter_from_kern(struct task_struct *task,
+		struct sock_fprog_kern *fprog)
+{
+	struct seccomp_filter *filter;
+
+	filter = seccomp_prepare_filter_from_kern(fprog);
+	if (!filter)
+		return -ENOMEM;
+
+	spin_lock_irq(&task->sighand->siglock);
+
+	filter->prev = task->seccomp.filter;
+	task->seccomp.filter = filter;
+
+	task->seccomp.mode = SECCOMP_MODE_FILTER;
+	/*
+	 * Make sure TIF_SECCOMP cannot be set before the mode (and
+	 * filter) is set.
+	 */
+	smp_mb__before_atomic();
+	set_tsk_thread_flag(task, TIF_SECCOMP);
+
+	spin_unlock_irq(&task->sighand->siglock);
+
+	return 0;
+}
 
 static long seccomp_get_action_avail(const char __user *uaction)
 {

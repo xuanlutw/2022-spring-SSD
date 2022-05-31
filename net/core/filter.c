@@ -1378,7 +1378,7 @@ EXPORT_SYMBOL_GPL(bpf_prog_create);
  * Just bpf_prog_create() with @trans.
  */
 int bpf_prog_create_haha(struct bpf_prog **pfp, struct sock_fprog_kern *fprog,
-        bpf_aux_classic_check_t trans)
+		bpf_aux_classic_check_t trans)
 {
 	unsigned int fsize = bpf_classic_proglen(fprog);
 	struct bpf_prog *fp;
