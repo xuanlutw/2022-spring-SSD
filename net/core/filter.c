@@ -1286,7 +1286,7 @@ out_err:
 	return ERR_PTR(err);
 }
 
-static struct bpf_prog *bpf_prepare_filter(struct bpf_prog *fp,
+struct bpf_prog *bpf_prepare_filter(struct bpf_prog *fp,
 					   bpf_aux_classic_check_t trans)
 {
 	int err;
@@ -1368,6 +1368,49 @@ int bpf_prog_create(struct bpf_prog **pfp, struct sock_fprog_kern *fprog)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(bpf_prog_create);
+
+/**
+ *	bpf_prog_create_haha - create an unattached filter
+ *	@pfp: the unattached filter that is created
+ *	@fprog: the filter program
+ *	@trans: post-classic verifier transformation handler
+ *
+ * Just bpf_prog_create() with @trans.
+ */
+int bpf_prog_create_haha(struct bpf_prog **pfp, struct sock_fprog_kern *fprog,
+        bpf_aux_classic_check_t trans)
+{
+	unsigned int fsize = bpf_classic_proglen(fprog);
+	struct bpf_prog *fp;
+
+	/* Make sure new filter is there and in the right amounts. */
+	if (!bpf_check_basics_ok(fprog->filter, fprog->len))
+		return -EINVAL;
+
+	fp = bpf_prog_alloc(bpf_prog_size(fprog->len), 0);
+	if (!fp)
+		return -ENOMEM;
+
+	memcpy(fp->insns, fprog->filter, fsize);
+
+	fp->len = fprog->len;
+	/* Since unattached filters are not copied back to user
+	 * space through sk_get_filter(), we do not need to hold
+	 * a copy here, and can spare us the work.
+	 */
+	fp->orig_prog = NULL;
+
+	/* bpf_prepare_filter() already takes care of freeing
+	 * memory in case something goes wrong.
+	 */
+	fp = bpf_prepare_filter(fp, trans);
+	if (IS_ERR(fp))
+		return PTR_ERR(fp);
+
+	*pfp = fp;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(bpf_prog_create_haha);
 
 /**
  *	bpf_prog_create_from_user - create an unattached filter from user buffer

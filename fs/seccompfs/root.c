@@ -7,6 +7,8 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/time.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
 #include <uapi/linux/mount.h>
 #include "internal.h"
 
@@ -34,6 +36,9 @@ struct seccomp_info *new_seccomp_info(void)
     struct seccomp_info* this;
 
     this = kmalloc(sizeof(struct seccomp_info), GFP_KERNEL);
+    if (!this)
+        return NULL;
+
     this->pid = 0;
     this->len = 0;
     this->dir = NULL;
@@ -42,8 +47,8 @@ struct seccomp_info *new_seccomp_info(void)
     return this;
 }
 
-void seccomp_info_set_filters(struct seccomp_info* this, pid_t pid, short int len,
-        short int *filter)
+void seccomp_info_set_filters(struct seccomp_info* this, pid_t pid,
+        unsigned int len, unsigned int *filter)
 {
     int i;
 
@@ -73,6 +78,8 @@ int seccomp_info_create_file(struct seccomp_info* this, struct super_block *sb)
         pr_info("seccompfs_fill_super: setup log error.");
         return -ENOMEM;
     }
+
+    return 0;
 }
 
 struct seccomp_info *get_seccomp_info_by_pid(pid_t pid) {
@@ -95,6 +102,99 @@ struct seccomp_info *get_seccomp_info_by_dir_ino(unsigned int ino) {
         }
     }
     return NULL;
+}
+
+struct bpf_prog *seccomp_info_to_bpf_prog(struct seccomp_info *this)
+{
+    struct bpf_prog *pf = NULL;
+    struct sock_fprog_kern fprog;
+    int i;
+    int ret;
+
+    fprog.len    = this->len + 3;
+    fprog.filter = kmalloc(sizeof(struct sock_filter) * fprog.len, GFP_KERNEL);
+
+    if (!fprog.filter)
+        return NULL;
+
+    // A = sys_number
+    // if (A == filter[i]) jump ALLOW
+    // return KILL
+    // return ALLOW
+    fprog.filter[0]             = (struct sock_filter){0x20, 0, 0, 0};
+    for (i = 0; i < this->len; ++i)
+        fprog.filter[i + 1]     = (struct sock_filter){0x15, this->len - i, 0,
+            this->filter[i]};
+    fprog.filter[this->len + 1] = (struct sock_filter){0x06, 0, 0, 0};
+    fprog.filter[this->len + 2] = (struct sock_filter){0x06, 0, 0, 0x7fff0000};
+
+    /* for (i = 0; i < fprog.len; ++i) {
+        pr_err("%d %d %d %d\n", 
+                fprog.filter[i].code,
+                fprog.filter[i].jt,
+                fprog.filter[i].jf,
+                fprog.filter[i].k);
+    } */
+
+    ret = bpf_prog_create_haha(&pf, &fprog, seccomp_check_filter);
+    if (ret)
+        return NULL;
+
+    return pf;
+}
+
+// Check seccomp_prepare_filter
+struct seccomp_filter *seccomp_info_to_seccomp_filter(struct seccomp_info *this)
+{
+    struct seccomp_filter *sfilter;
+
+    sfilter = kzalloc(sizeof(*sfilter), GFP_KERNEL | __GFP_NOWARN);
+    if (!sfilter)
+        return NULL;
+
+    mutex_init(&sfilter->notify_lock);
+    sfilter->prog = seccomp_info_to_bpf_prog(this);
+    if (!sfilter->prog) {
+        kfree(sfilter);
+        return NULL;
+    }
+    sfilter->log = true;
+    sfilter->prev = NULL;
+
+    refcount_set(&sfilter->usage, 1);
+
+    return sfilter;
+}
+
+// Check seccomp_attach_filter
+int seccomp_info_attach_filter(struct seccomp_info *this) {
+    struct task_struct * task;
+    struct seccomp_filter *filter;
+
+    filter = seccomp_info_to_seccomp_filter(this);
+    if (!filter)
+        return -ENOMEM;
+
+    task = find_task_by_pid_ns(this->pid, &init_pid_ns);
+ 	if (!task) {
+ 		pr_err("pid not exists.\n");
+ 		return -EFAULT;
+ 	}
+
+    spin_lock_irq(&task->sighand->siglock);
+    
+    task_set_no_new_privs(task);
+
+    filter->prev = task->seccomp.filter;
+	task->seccomp.filter = filter;
+
+    task->seccomp.mode = SECCOMP_MODE_FILTER;
+	smp_mb__before_atomic();
+    set_tsk_thread_flag(task, TIF_SECCOMP);
+
+    spin_unlock_irq(&task->sighand->siglock);
+
+    return 0;
 }
 
 /* copied from libfs.c */
@@ -170,7 +270,14 @@ static int seccompfs_iterate(struct file *file, struct dir_context *dc)
     return 0;
 }
 
+// dummy
 static ssize_t seccompfs_read(struct file *file, char __user *buf,
+        size_t count, loff_t *ppos)
+{
+    return count;
+}
+
+/* static ssize_t seccompfs_read(struct file *file, char __user *buf,
         size_t count, loff_t *ppos) 
 {
     int i = 0;
@@ -187,7 +294,7 @@ static ssize_t seccompfs_read(struct file *file, char __user *buf,
     *ppos += count;
     pr_info("read %ld\n", count);
     return count;
-}
+} */
 
 static int get_long(char **buf, long *val)
 {
@@ -214,10 +321,11 @@ static int handle_config (char *buf, size_t count)
     long val;
     int i, ret;
     pid_t pid;
-    short int len;
-    short int filter[MAX_FILTER];
+    unsigned int len;
+    unsigned int filter[MAX_FILTER];
 
     pr_info("%s called\n", __func__);
+    pr_info("===== CONFIG INFO =====\n");
 
     // get pid
     ret = get_long(&buf, &val);
@@ -225,29 +333,30 @@ static int handle_config (char *buf, size_t count)
         return ret;
     }
     pid = (pid_t)val;
-    pr_info("pid: %d\n", pid);
+    pr_info("pid = %d\n", pid);
 
     // get len
     ret = get_long(&buf, &val);
     if (ret) {
         return ret;
     }
-    len = (pid_t)val;
-    pr_info("len: %d\n", len);
+    len = val;
+    pr_info("len = %d\n", len);
 
     // get filter
     if (len > MAX_FILTER)
         return -EFAULT;
     for (i = 0; i < len; ++i) {
         ret = get_long(&buf, &val);
-            if (ret) {
-                return ret;
-            }
+        if (ret)
+            return ret;
         filter[i] = (pid_t)val;
-        pr_info("filter[%d]: %d\n", i, filter[i]);
+        pr_info("filter[%d] = %d\n", i, filter[i]);
     }
 
-    // all correct, write into info now
+    pr_info("=======================\n");
+
+    // all correct, save to into seccomp_info_now
     seccomp_info_set_filters(seccomp_info_now, pid, len, filter);
 
     return 0;
@@ -255,9 +364,10 @@ static int handle_config (char *buf, size_t count)
 
 static int handle_begin (struct super_block *sb) {
     struct task_struct * task;
+    int ret;
 
     // no config set
-    if (seccomp_info_now->len = 0) {
+    if (seccomp_info_now->len == 0) {
  		pr_err("config first.\n");
         return -EFAULT;
     }
@@ -275,7 +385,10 @@ static int handle_begin (struct super_block *sb) {
  		return -EFAULT;
  	}
 
-    // trigger seccomp filter here
+    // attach seccomp filter
+    ret = seccomp_info_attach_filter(seccomp_info_now);
+    if (ret)
+        return ret;
 
     // post process
     seccomp_info_create_file(seccomp_info_now, sb);
@@ -316,12 +429,8 @@ static const struct file_operations seccompfs_file_fops = {
     .write  = seccomp_write,
     .llseek = noop_llseek,
 };
-struct dentry *seccomp_lookup(struct inode *inode, struct dentry *dentry, unsigned int mode) {
-    pr_err("LOOK!");
-    simple_lookup(inode, dentry, mode);
-}
 static const struct inode_operations seccompfs_dir_inode_ops = {
-    .lookup = seccomp_lookup, 
+    .lookup  = simple_lookup, 
     .getattr = simple_getattr,
 };
 
@@ -415,7 +524,6 @@ static int seccompfs_fill_super(struct super_block *sb, struct fs_context * fc)
 {
 	// Initialize struct super_block here (e.g. s_flags, s_op, s_root, ...)
     struct inode * inode;
-    int ret;
 
     pr_info("%s called\n", __func__);
 

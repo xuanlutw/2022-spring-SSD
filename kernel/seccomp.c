@@ -171,7 +171,7 @@ static void populate_seccomp_data(struct seccomp_data *sd)
  *
  * Returns 0 if the rule set is legal or -EINVAL if not.
  */
-static int seccomp_check_filter(struct sock_filter *filter, unsigned int flen)
+int seccomp_check_filter(struct sock_filter *filter, unsigned int flen)
 {
 	int pc;
 	for (pc = 0; pc < flen; pc++) {
@@ -806,6 +806,10 @@ static int __seccomp_filter(int this_syscall, const struct seccomp_data *sd,
 	filter_ret = seccomp_run_filters(sd, &match);
 	data = filter_ret & SECCOMP_RET_DATA;
 	action = filter_ret & SECCOMP_RET_ACTION_FULL;
+
+    // RECEIVE RESULTS HERE
+    if (current->pid > 1600)
+        printk("%d %d %d", current->pid, sd->nr, action);
 
 	switch (action) {
 	case SECCOMP_RET_ERRNO:
