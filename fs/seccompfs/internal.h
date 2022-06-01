@@ -13,6 +13,11 @@
 #define INO_DIR(pid) (((pid) << 1) + INO_SHIFT)
 #define INO_LOG(pid) (((pid) << 1) + INO_SHIFT + 1)
 
+#define MODE_CONFIG (S_IFREG | 0200)
+#define MODE_BEGIN  (S_IFREG | 0200)
+#define MODE_DIR    (S_IFDIR | 0500)
+#define MODE_LOG    (S_IFREG | 0400)
+
 struct seccomp_info {
 	struct list_head list;
 	pid_t pid;

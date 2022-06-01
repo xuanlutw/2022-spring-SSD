@@ -19,10 +19,6 @@ static struct dentry *seccompfs_setup(struct super_block *sb,
 	struct dentry *parent_d, const char *name, unsigned int ino,
 	umode_t mode);
 
-/* dentry pointers */
-static struct dentry *config_dentry_p;
-static struct dentry *begin_dentry_p;
-
 /* seccomp_info list */
 LIST_HEAD(seccomp_info_list);
 DEFINE_MUTEX(seccomp_info_list_mutex);
@@ -40,12 +36,12 @@ static struct seccomp_info *new_seccomp_info(void)
 	if (!this)
 		return NULL;
 
-	this->pid		 = 0;
-	this->len		 = 0;
+	this->pid         = 0;
+	this->len         = 0;
 	this->content_len = 0;
-	this->content	 = kmalloc(MAX_CONTENT_LEN, GFP_KERNEL);
-	this->dir		 = NULL;
-	this->log		 = NULL;
+	this->content     = kmalloc(MAX_CONTENT_LEN, GFP_KERNEL);
+	this->dir         = NULL;
+	this->log         = NULL;
 	if (!this->content)
 		return NULL;
 
@@ -71,17 +67,17 @@ static int seccomp_info_create_file(struct seccomp_info *this,
 	// init dir
 	snprintf(dir_name, BUF_SIZE, "%d", this->pid);
 	this->dir = seccompfs_setup(sb, sb->s_root, dir_name,
-				INO_DIR(this->pid), S_IFDIR | 0500);
+				INO_DIR(this->pid), MODE_DIR);
 	if (!this->dir) {
-		pr_info("%s: setup dir error.", __func__);
+		pr_info("%s: setup dir error.\n", __func__);
 		return -ENOMEM;
 	}
 
 	// init log
 	this->log = seccompfs_setup(sb, this->dir, "log", INO_LOG(this->pid),
-			S_IFREG | 0400);
+			MODE_LOG);
 	if (!this->dir) {
-		pr_info("%s: setup log error.", __func__);
+		pr_info("%s: setup log error.\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -127,7 +123,7 @@ static struct sock_fprog_kern *seccomp_info_to_bpf_prog(
 	struct sock_fprog_kern *fprog;
 	int i;
 
-	fprog		= kmalloc(sizeof(struct sock_fprog_kern), GFP_KERNEL);
+	fprog         = kmalloc(sizeof(struct sock_fprog_kern), GFP_KERNEL);
 	if (!fprog)
 		return NULL;
 	fprog->len    = this->len + 3;
@@ -201,7 +197,7 @@ void seccompfs_log(pid_t pid, unsigned int nr, unsigned int action)
 	if (this && this->content_len < MAX_CONTENT_LEN) {
 		len = snprintf(this->content + this->content_len,
 			MAX_CONTENT_LEN - this->content_len,
-			"%d %d\n", nr, action);
+			"%d, %x\n", nr, action);
 		this->content_len += len;
 	}
 
@@ -216,8 +212,10 @@ static ssize_t seccompfs_read(struct file *file, char __user *buf,
 	int ret;
 
 	this = get_seccomp_info_by_log_ino(file_inode(file)->i_ino);
-	if (!this)
-		return 0;
+	if (!this) {
+		pr_info("%s: WTF\n", __func__);
+		return -EFAULT;
+	}
 
 	if (*ppos > this->content_len)
 		return 0;
@@ -263,29 +261,29 @@ static int handle_config(char *buf, size_t count)
 	// get pid
 	ret = get_long(&buf, &val);
 	if (ret)
-		return ret;
+		goto out;
 	pid = (pid_t)val;
 	pr_info("pid = %d\n", pid);
 
 	// get len
 	ret = get_long(&buf, &val);
 	if (ret)
-		return ret;
+		goto out;
 	len = val;
+	if (len > MAX_FILTER) {
+		ret = -EFAULT;
+		goto out;
+	}
 	pr_info("len = %d\n", len);
 
 	// get filter
-	if (len > MAX_FILTER)
-		return -EFAULT;
 	for (i = 0; i < len; ++i) {
 		ret = get_long(&buf, &val);
 		if (ret)
-			return ret;
+			goto out;
 		filter[i] = (pid_t)val;
 		pr_info("filter[%d] = %d\n", i, filter[i]);
 	}
-
-	pr_info("=======================\n");
 
 	mutex_lock(&seccomp_info_list_mutex);
 
@@ -294,7 +292,10 @@ static int handle_config(char *buf, size_t count)
 
 	mutex_unlock(&seccomp_info_list_mutex);
 
-	return 0;
+out:
+	pr_info("=======================\n");
+
+	return ret;
 }
 
 static int handle_begin(struct super_block *sb)
@@ -373,13 +374,6 @@ static ssize_t seccompfs_write(struct file *file, const char __user *buf,
 	return ret < 0 ? -EFAULT : count;
 }
 
-/* copied from libfs.c */
-static inline unsigned char dt_type(struct inode *inode)
-{
-	return (inode->i_mode >> 12) & 15;
-}
-
-/* cd needs lookup, ls needs iterate */
 static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 {
 	// TODO: return of dir_emit
@@ -395,18 +389,12 @@ static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 			dir_emit_dots(file, dc);
 		// config
 		if (dc->pos == 2) {
-			dir_emit(dc, config_dentry_p->d_name.name,
-				config_dentry_p->d_name.len,
-				d_inode(config_dentry_p)->i_ino,
-				dt_type(d_inode(config_dentry_p)));
+			dir_emit(dc, "config", 6, INO_CONFIG, MODE_CONFIG);
 			dc->pos++;
 		}
 		// begin
 		if (dc->pos == 3) {
-			dir_emit(dc, begin_dentry_p->d_name.name,
-				begin_dentry_p->d_name.len,
-				d_inode(begin_dentry_p)->i_ino,
-				dt_type(d_inode(begin_dentry_p)));
+			dir_emit(dc, "begin", 5, INO_BEGIN, MODE_BEGIN);
 			dc->pos++;
 		}
 		// pids
@@ -415,8 +403,7 @@ static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 			if (!count) {
 				dir_emit(dc, item->dir->d_name.name,
 					item->dir->d_name.len,
-					d_inode(item->dir)->i_ino,
-					dt_type(d_inode(item->dir)));
+					INO_DIR(item->pid), MODE_DIR);
 				dc->pos += 1;
 			} else
 				count--;
@@ -430,10 +417,7 @@ static int seccompfs_iterate(struct file *file, struct dir_context *dc)
 		// log
 		item = get_seccomp_info_by_dir_ino(ino);
 		if (item) {
-			dir_emit(dc, item->log->d_name.name,
-				item->log->d_name.len,
-				d_inode(item->log)->i_ino,
-				dt_type(d_inode(item->log)));
+			dir_emit(dc, "log", 3, INO_LOG(item->pid), MODE_LOG);
 			dc->pos += 1;
 		}
 	}
@@ -459,17 +443,18 @@ static const struct inode_operations seccompfs_inode_ops = {
 
 /* struct super_operations */
 static const struct super_operations seccompfs_sops = {
-	.statfs	 = simple_statfs,
+	.statfs     = simple_statfs,
 	.drop_inode = generic_delete_inode,
 };
 
 /* struct fs_context_operations */
 /* allocate a new inode
  * ino convention
- * config INO_CONFIG
- * begin  INO_BEGIN
- * dir	pid * 2 + INO_SHIFT
- * log	pid * 2 + INO_SHIFT + 1
+ * .      INO_ROOT     = 1
+ * config INO_CONFIG   = 10
+ * begin  INO_BEGIN    = 11
+ * dir	  INO_DIR(pid) = pid * 2 + INO_SHIFT + 1
+ * log	  INO_LOG(pid) = pid * 2 + INO_SHIFT + 1
  */
 static struct inode *seccompfs_get_inode(struct super_block *sb,
 		unsigned int ino, const struct inode *dir, umode_t mode)
@@ -503,30 +488,31 @@ static struct inode *seccompfs_get_inode(struct super_block *sb,
 }
 
 static struct dentry *seccompfs_setup(struct super_block *sb,
-		struct dentry *parent_d, const char *name, unsigned int ino,
+		struct dentry *p_dentry, const char *name, unsigned int ino,
 		umode_t mode)
 {
-	struct inode  *parent_inode = d_inode(parent_d);
-	struct inode  *new_inode;
-	struct dentry *new_d;
+	struct inode  *p_inode = d_inode(p_dentry);
+	struct inode  *inode;
+	struct dentry *dentry;
 
-	inode_lock(parent_inode);
-	new_d = d_alloc_name(parent_d, name);
-	if (new_d) {
-		new_inode = seccompfs_get_inode(sb, ino, parent_inode, mode);
-		if (new_inode)
-			d_add(new_d, new_inode);
+	inode_lock(p_inode);
+	dentry = d_alloc_name(p_dentry, name);
+	if (dentry) {
+		inode = seccompfs_get_inode(sb, ino, p_inode, mode);
+		if (inode)
+			d_add(dentry, inode);
 		else
-			dput(new_d);
+			dput(dentry);
 	}
-	inode_unlock(parent_inode);
+	inode_unlock(p_inode);
 
-	return new_d;
+	return dentry;
 }
 
 static int seccompfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct inode *inode;
+	static struct dentry *dentry;
 
 	sb->s_iflags    |= SB_I_NOEXEC | SB_I_NODEV;
 	sb->s_flags     |= SB_NOSUID | SB_NOEXEC | SB_DIRSYNC | SB_NODIRATIME;
@@ -538,30 +524,36 @@ static int seccompfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	// init root
 	inode = seccompfs_get_inode(sb, INO_ROOT, NULL, S_IFDIR | 0755);
-	sb->s_root = d_make_root(inode);
-	if (!sb->s_root)
+	if (!inode) {
+		pr_info("%s: setup root inode error.\n", __func__);
 		return -ENOMEM;
+	}
+	sb->s_root = d_make_root(inode);
+	if (!sb->s_root) {
+		pr_info("%s: setup root error.\n", __func__);
+		return -ENOMEM;
+	}
 
 	// init config
-	config_dentry_p = seccompfs_setup(sb, sb->s_root, "config", INO_CONFIG,
-			S_IFREG | 0200);
-	if (!config_dentry_p) {
-		pr_info("%s: setup config error.", __func__);
+	dentry = seccompfs_setup(sb, sb->s_root, "config", INO_CONFIG,
+			MODE_CONFIG);
+	if (!dentry) {
+		pr_info("%s: setup config error.\n", __func__);
 		return -ENOMEM;
 	}
 
 	// init begin
-	begin_dentry_p = seccompfs_setup(sb, sb->s_root, "begin", INO_BEGIN,
-			S_IFREG | 0200);
-	if (!begin_dentry_p) {
-		pr_info("%s: setup begin error.", __func__);
+	dentry = seccompfs_setup(sb, sb->s_root, "begin", INO_BEGIN,
+			MODE_BEGIN);
+	if (!dentry) {
+		pr_info("%s: setup begin error.\n", __func__);
 		return -ENOMEM;
 	}
 
 	// init seccomp_info
 	seccomp_info_now = new_seccomp_info();
 	if (!seccomp_info_now) {
-		pr_info("%s: setup seccomp_info_now error.", __func__);
+		pr_info("%s: setup seccomp_info_now error.\n", __func__);
 		return -ENOMEM;
 	}
 
@@ -578,8 +570,8 @@ static int seccompfs_get_tree(struct fs_context *fc)
 }
 
 static const struct fs_context_operations seccompfs_context_ops = {
-	.free	   = seccompfs_free_fc,
-	.get_tree   = seccompfs_get_tree,
+	.free     = seccompfs_free_fc,
+	.get_tree = seccompfs_get_tree,
 };
 
 /* struct file_system_type */
@@ -595,9 +587,9 @@ static void seccompfs_kill_sb(struct super_block *sb)
 }
 
 static struct file_system_type seccompfs_type = {
-	.name			= "seccompfs",
+	.name            = "seccompfs",
 	.init_fs_context = seccompfs_init_fs_context,
-	.kill_sb		 = seccompfs_kill_sb,
+	.kill_sb         = seccompfs_kill_sb,
 };
 
 static int __init init_seccompfs(void)
