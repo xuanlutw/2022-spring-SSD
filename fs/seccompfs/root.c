@@ -42,8 +42,10 @@ static struct seccomp_info *new_seccomp_info(void)
 	this->content     = kmalloc(MAX_CONTENT_LEN, GFP_KERNEL);
 	this->dir         = NULL;
 	this->log         = NULL;
-	if (!this->content)
+	if (!this->content) {
+		kfree(this);
 		return NULL;
+	}
 
 	return this;
 }
@@ -159,21 +161,15 @@ static struct sock_fprog_kern *seccomp_info_to_bpf_prog(
 	return fprog;
 }
 
-static int seccomp_info_attach(struct seccomp_info *this)
+static int seccomp_info_attach(struct seccomp_info *this,
+	struct task_struct *task)
 {
-	struct task_struct *task;
 	struct sock_fprog_kern *fprog;
-	int ret;
-
-	task = find_task_by_pid_ns(this->pid, &init_pid_ns);
-	if (!task) {
-		pr_info("%s: pid not exists.\n", __func__);
-		return -EFAULT;
-	}
+	int ret = -EFAULT;
 
 	fprog = seccomp_info_to_bpf_prog(this);
 	if (!fprog)
-		return -EFAULT;
+		goto out;
 
 	task_set_no_new_privs(task);
 
@@ -182,6 +178,7 @@ static int seccomp_info_attach(struct seccomp_info *this)
 	kfree(fprog->filter);
 	kfree(fprog);
 
+out:
 	return ret;
 }
 
@@ -320,14 +317,19 @@ static int handle_begin(struct super_block *sb)
 	}
 
 	// check exists of pid
+	read_lock(&tasklist_lock);
 	task = find_task_by_pid_ns(seccomp_info_now->pid, &init_pid_ns);
+	if (task)
+		get_task_struct(task);
+	read_unlock(&tasklist_lock);
 	if (!task) {
 		pr_info("%s: pid not exists.\n", __func__);
 		goto out;
 	}
 
 	// attach seccomp filter
-	ret = seccomp_info_attach(seccomp_info_now);
+	ret = seccomp_info_attach(seccomp_info_now, task);
+	put_task_struct(task);
 	if (ret)
 		goto out;
 
